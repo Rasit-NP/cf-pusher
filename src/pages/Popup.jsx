@@ -83,7 +83,7 @@ const Popup = () => {
       }
     });
 
-    chrome.storage.sync.get("githubToken", (result) => {
+    chrome.storage.local.get("githubToken", (result) => {
       if (result.githubToken) {
         setGithubToken(result.githubToken);
       }
@@ -261,14 +261,6 @@ const Popup = () => {
     );
   };
 
-  const connectWithToken = async (token) => {
-    if (!token) {
-      showNotification("Please enter a valid token", "error");
-      return;
-    }
-    await validateAndSetToken(token);
-  };
-
   const validateAndSetToken = async (token) => {
     try {
       // Validate the token by fetching user info
@@ -280,7 +272,7 @@ const Popup = () => {
         const userData = await userResponse.json();
 
         setGithubToken(token);
-        chrome.storage.sync.set({ githubToken: token });
+        chrome.storage.local.set({ githubToken: token });
         setGithubUsername(userData.login);
         showNotification(`Connected to GitHub as ${userData.login}`, "success");
       } else {
@@ -293,12 +285,14 @@ const Popup = () => {
   };
 
   const disconnectFromGitHub = () => {
-    chrome.storage.sync.remove(["githubToken", "linkedRepo"], () => {
-      setGithubToken(null);
-      setLinkedRepo("");
-      setRepoInput("");
-      setGithubUsername("");
-      showNotification("Disconnected from GitHub", "info");
+    chrome.storage.local.remove(["githubToken"], () => {
+      chrome.storage.sync.remove(["linkedRepo"], () => {
+        setGithubToken(null);
+        setLinkedRepo("");
+        setRepoInput("");
+        setGithubUsername("");
+        showNotification("Disconnected from GitHub", "info");
+      });
     });
   };
 
@@ -475,32 +469,8 @@ const Popup = () => {
                   onClick={connectToGitHub}
                   className="flex items-center gap-2 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-sm transition-colors">
                   <FaGithub className="w-4 h-4" />
-                  Connect with OAuth
+                  Connect with GitHub
                 </button>
-
-                <div className="text-xs text-center text-gray-500 dark:text-gray-400">
-                  or
-                </div>
-
-                <div>
-                  <input
-                    type="password"
-                    placeholder="GitHub Personal Access Token"
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-800"
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        connectWithToken(e.target.value.trim());
-                      }
-                    }}
-                  />
-                  <a
-                    href="https://github.com/settings/tokens/new?scopes=repo"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs text-blue-600 dark:text-blue-400 hover:underline mt-1 block">
-                    Create token here (needs 'repo' scope)
-                  </a>
-                </div>
               </div>
             )}
           </div>

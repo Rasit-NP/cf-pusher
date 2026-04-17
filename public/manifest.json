@@ -14,7 +14,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": ["https://codeforces.com/*"],
       "js": ["content.js"]
     }
   ],

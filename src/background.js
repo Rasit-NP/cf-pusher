@@ -217,8 +217,8 @@ const syncLatestAcceptedSubmission = async (
 
     const folderName = `${contestId}/${index} - ${problemName}`;
     const extension = getExtensionFromLanguage(programmingLanguage);
-    const filePath = `${folderName}/solution.${extension}`;
-    const readmePath = `${folderName}/README.md`;
+    const filePath = `Codeforces/${folderName}/solution.${extension}`;
+    const readmePath = `Codeforces/${folderName}/README.md`;
 
     const cacheKey = `cf-synced-problems`;
     const problemCacheKey = `cf-problem-${contestId}-${index}`;
@@ -368,7 +368,7 @@ const setupPeriodicSync = async () => {
 
   try {
     const [githubTokenObj, linkedRepoObj, cfHandleObj] = await Promise.all([
-      new Promise((resolve) => chrome.storage.sync.get("githubToken", resolve)),
+      new Promise((resolve) => chrome.storage.local.get("githubToken", resolve)),
       new Promise((resolve) => chrome.storage.sync.get("linkedRepo", resolve)),
       new Promise((resolve) => chrome.storage.sync.get("cf_handle", resolve)),
     ]);
@@ -413,7 +413,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     try {
       const [githubTokenObj, linkedRepoObj, cfHandleObj] = await Promise.all([
         new Promise((resolve) =>
-          chrome.storage.sync.get("githubToken", resolve)
+          chrome.storage.local.get("githubToken", resolve)
         ),
         new Promise((resolve) =>
           chrome.storage.sync.get("linkedRepo", resolve)
@@ -451,12 +451,17 @@ chrome.runtime.onInstalled.addListener(() => {
 // 🚀 IMPROVEMENT: Handle storage changes to restart sync when credentials change
 chrome.storage.onChanged.addListener((changes, namespace) => {
   if (namespace === "sync") {
-    const credentialKeys = ["githubToken", "linkedRepo", "cf_handle"];
-    const hasCredentialChanges = credentialKeys.some((key) => changes[key]);
-
-    if (hasCredentialChanges) {
+    const syncCredentialKeys = ["linkedRepo", "cf_handle"];
+    const hasSyncChanges = syncCredentialKeys.some((key) => changes[key]);
+    if (hasSyncChanges) {
       console.log("🔄 Credentials changed, restarting sync");
-      setTimeout(setupPeriodicSync, 1000); // Small delay to ensure all changes are saved
+      setTimeout(setupPeriodicSync, 1000);
+    }
+  }
+  if (namespace === "local") {
+    if (changes["githubToken"]) {
+      console.log("🔄 GitHub token changed, restarting sync");
+      setTimeout(setupPeriodicSync, 1000);
     }
   }
 });
@@ -466,28 +471,29 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "manualSync") {
     console.log("🔄 Manual sync triggered from popup");
 
-    chrome.storage.sync.get(
-      ["githubToken", "linkedRepo", "cf_handle"],
-      async (result) => {
-        const { githubToken, linkedRepo, cf_handle } = result;
+    Promise.all([
+      new Promise((resolve) => chrome.storage.local.get("githubToken", resolve)),
+      new Promise((resolve) => chrome.storage.sync.get(["linkedRepo", "cf_handle"], resolve)),
+    ]).then(async ([localResult, syncResult]) => {
+      const githubToken = localResult.githubToken;
+      const { linkedRepo, cf_handle } = syncResult;
 
-        if (githubToken && linkedRepo && cf_handle) {
-          try {
-            await syncLatestAcceptedSubmission(
-              githubToken,
-              linkedRepo,
-              cf_handle
-            );
-            sendResponse({ success: true });
-          } catch (error) {
-            console.error("Manual sync failed:", error);
-            sendResponse({ success: false, error: error.message });
-          }
-        } else {
-          sendResponse({ success: false, error: "Missing credentials" });
+      if (githubToken && linkedRepo && cf_handle) {
+        try {
+          await syncLatestAcceptedSubmission(
+            githubToken,
+            linkedRepo,
+            cf_handle
+          );
+          sendResponse({ success: true });
+        } catch (error) {
+          console.error("Manual sync failed:", error);
+          sendResponse({ success: false, error: error.message });
         }
+      } else {
+        sendResponse({ success: false, error: "Missing credentials" });
       }
-    );
+    });
 
     return true; // Indicates we will send a response asynchronously
   }
@@ -496,21 +502,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "triggerImmediateSync") {
     console.log("⚡ Immediate sync triggered by user activity");
 
-    chrome.storage.sync.get(
-      ["githubToken", "linkedRepo", "cf_handle"],
-      async (result) => {
-        const { githubToken, linkedRepo, cf_handle } = result;
+    Promise.all([
+      new Promise((resolve) => chrome.storage.local.get("githubToken", resolve)),
+      new Promise((resolve) => chrome.storage.sync.get(["linkedRepo", "cf_handle"], resolve)),
+    ]).then(async ([localResult, syncResult]) => {
+      const githubToken = localResult.githubToken;
+      const { linkedRepo, cf_handle } = syncResult;
 
-        if (githubToken && linkedRepo && cf_handle) {
-          // Clear cache to force fresh data
-          cache.submissions.data = null;
-          await syncLatestAcceptedSubmission(
-            githubToken,
-            linkedRepo,
-            cf_handle
-          );
-        }
+      if (githubToken && linkedRepo && cf_handle) {
+        // Clear cache to force fresh data
+        cache.submissions.data = null;
+        await syncLatestAcceptedSubmission(
+          githubToken,
+          linkedRepo,
+          cf_handle
+        );
       }
-    );
+    });
   }
 });
