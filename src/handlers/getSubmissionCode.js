@@ -77,7 +77,7 @@ export const getSubmissionCode = (contestId, submissionId) => {
               "Timeout: Could not retrieve submission code. Please ensure you're logged in to Codeforces."
             )
           );
-        }, 2000); // 🚀 Reduced to 2s for faster response
+        }, 8000); // 🚀 Increased to 8s for better reliability
       } catch (error) {
         reject(new Error(`Failed to create hidden context: ${error.message}`));
       }
@@ -133,7 +133,7 @@ export const getProblemStatement = (contestId, index) => {
         timeoutId = setTimeout(() => {
           cleanup();
           reject(new Error("Timeout: Could not retrieve problem statement"));
-        }, 3000); // 🚀 Reduced to 3s for faster response
+        }, 10000); // 🚀 Increased to 10s for better reliability
       } catch (error) {
         reject(new Error(`Failed to create hidden context: ${error.message}`));
       }

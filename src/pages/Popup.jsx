@@ -241,8 +241,8 @@ const Popup = () => {
       },
       function (redirectUrl) {
         if (chrome.runtime.lastError) {
-          console.error("OAuth Error:", chrome.runtime.lastError);
-          showNotification("Failed to connect to GitHub", "error");
+          console.error("OAuth Error:", JSON.stringify(chrome.runtime.lastError));
+          showNotification(`GitHub Connection Failed: ${chrome.runtime.lastError.message || "Unknown Error"}`, "error");
           return;
         }
 

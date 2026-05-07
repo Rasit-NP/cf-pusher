@@ -27,32 +27,41 @@ const extractSubmissionCode = () => {
     "pre.prettyprint",
     ".source pre",
     "#program-source-text",
-    'pre:contains("main")',
+    ".datatable pre",
   ];
 
   for (const selector of selectors) {
     try {
       const element = document.querySelector(selector);
-      if (element && element.textContent.trim()) {
-        console.log(`✅ Found code using selector: ${selector}`);
-        return element.textContent.trim();
+      if (element) {
+        // innerText is better than textContent as it respects line breaks and
+        // often ignores elements styled with user-select: none (like line numbers)
+        const code = element.innerText || element.textContent;
+        if (code && code.trim().length > 0) {
+          console.log(`✅ Found code using selector: ${selector}`);
+          return code.trim();
+        }
       }
     } catch (err) {
       console.warn(`Selector failed: ${selector}`, err);
     }
   }
 
+  // Fallback: search for any pre that looks like code
   const allPre = document.querySelectorAll("pre");
   for (const pre of allPre) {
-    const content = pre.textContent.trim();
+    const content = pre.innerText || pre.textContent;
+    const trimmed = content.trim();
     if (
-      content.length > 50 &&
-      (content.includes("int") ||
-        content.includes("def") ||
-        content.includes("class"))
+      trimmed.length > 50 &&
+      (trimmed.includes("#include") ||
+        trimmed.includes("import ") ||
+        trimmed.includes("def ") ||
+        trimmed.includes("public class") ||
+        trimmed.includes("int main"))
     ) {
       console.log("✅ Found code using fallback pre search");
-      return content;
+      return trimmed;
     }
   }
 
@@ -150,39 +159,29 @@ const attemptExtraction = () => {
     return;
   }
 
-  if (document.readyState !== "complete") {
-    setTimeout(() => {
+  let attempts = 0;
+  const maxAttempts = 20; // Try for up to 5 seconds (20 * 250ms)
+
+  const tryExtract = () => {
+    if (quickExtract()) return;
+
+    attempts++;
+    if (attempts >= maxAttempts) {
       if (window.location.pathname.includes("/submission/")) {
-        const code = extractSubmissionCode();
-        if (code) {
-          sendResult("SUBMISSION_CODE", code);
-        } else {
-          sendResult("SUBMISSION_CODE", null, "Code element not found on page");
-        }
+        sendResult("SUBMISSION_CODE", null, "Code element not found on page");
       } else if (window.location.pathname.includes("/problem/")) {
-        const problemHTML = extractProblemStatement();
-        if (problemHTML) {
-          sendResult("PROBLEM_STATEMENT", problemHTML);
-        } else {
-          sendResult(
-            "PROBLEM_STATEMENT",
-            null,
-            "Problem statement not found on page"
-          );
-        }
+        sendResult(
+          "PROBLEM_STATEMENT",
+          null,
+          "Problem statement not found on page"
+        );
       }
-    }, 150);
-  } else {
-    if (window.location.pathname.includes("/submission/")) {
-      sendResult("SUBMISSION_CODE", null, "Code element not found on page");
-    } else if (window.location.pathname.includes("/problem/")) {
-      sendResult(
-        "PROBLEM_STATEMENT",
-        null,
-        "Problem statement not found on page"
-      );
+    } else {
+      setTimeout(tryExtract, 250);
     }
-  }
+  };
+
+  setTimeout(tryExtract, 250);
 };
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {

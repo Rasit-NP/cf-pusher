@@ -71,7 +71,7 @@ export const fetchAcceptedSubmissions = async (username, count = 20) => {
     const data = await response.json();
 
     if (data.status !== "OK") {
-      throw new Error("Failed to fetch submissions");
+      throw new Error(`Codeforces API error: ${data.comment || "Failed to fetch submissions"}`);
     }
     const acceptedSubmissions = data.result.filter(
       (submission) => submission.verdict === "OK"
@@ -91,6 +91,6 @@ export const fetchAcceptedSubmissions = async (username, count = 20) => {
     }));
   } catch (error) {
     console.error("Error fetching submissions:", error);
-    return [];
+    throw error; // Re-throw to handle it in the UI
   }
 };

@@ -1,4 +1,5 @@
 /* eslint-disable no-undef */
+import TurndownService from "turndown";
 import { fetchAcceptedSubmissions } from "./handlers/codeforcesHandler";
 import {
   getSubmissionCode,
@@ -118,41 +119,63 @@ const getProblemStatementCached = async (contestId, index, cacheKey) => {
   }
 };
 
-// 🚀 IMPROVEMENT: Simple HTML cleaning with better performance
-const simpleCleanHTML = (html) => {
+// Initialize TurndownService
+const turndownService = new TurndownService({
+  headingStyle: "atx",
+  codeBlockStyle: "fenced",
+  emDelimiter: "_",
+});
+
+// Add rules to TurndownService for MathJax and specific Codeforces elements
+turndownService.addRule("mathjax", {
+  filter: (node) => {
+    return (
+      node.nodeName === "SCRIPT" &&
+      (node.getAttribute("type") === "math/tex" ||
+        node.getAttribute("type") === "math/tex; mode=display")
+    );
+  },
+  replacement: (content, node) => {
+    const isDisplay = node.getAttribute("type").includes("display");
+    return isDisplay ? `\n\n$$${content}$$\n\n` : `$${content}$`;
+  },
+});
+
+// Remove unnecessary elements
+turndownService.remove(["script", "style", "noscript"]);
+
+// 🚀 IMPROVEMENT: Robust HTML to Markdown conversion
+const convertToMarkdown = (html) => {
   if (!html) return null;
 
   try {
-    let cleaned = html;
+    let processedHTML = html;
 
-    // Handle MathJax more efficiently
-    cleaned = cleaned.replace(
-      /<script[^>]*type=["']math\/tex[^"']*["'][^>]*>(.*?)<\/script>/g,
-      (match, mathContent) => `$${mathContent.trim()}$`
+    // Handle standard Codeforces MathJax span structure
+    processedHTML = processedHTML.replace(
+      /<span class=["']tex-font-style-tt["']>(.*?)<\/span>/g,
+      "`$1`"
     );
 
-    // Remove scripts and clean HTML
-    cleaned = cleaned.replace(/<script[^>]*>.*?<\/script>/gs, "");
-    cleaned = cleaned.replace(/<style[^>]*>.*?<\/style>/gs, "");
+    // Some MathJax might be in elements with specific classes
+    processedHTML = processedHTML.replace(
+      /<span class=["'](tex-graphics|mathjax-inline|mathjax-display)["'][^>]*>(.*?)<\/span>/g,
+      (match, cls, content) => {
+        return content.includes("$") ? content : `$${content}$`;
+      }
+    );
 
-    // Clean HTML entities more efficiently
-    const entityMap = {
-      "&lt;": "<",
-      "&gt;": ">",
-      "&amp;": "&",
-      "&quot;": '"',
-      "&nbsp;": " ",
-      "&apos;": "'",
-    };
+    // Convert to Markdown
+    let markdown = turndownService.turndown(processedHTML);
 
-    cleaned = cleaned.replace(/&(lt|gt|amp|quot|nbsp|apos);/g, (match) => {
-      return entityMap[match] || match;
-    });
+    // Post-process to fix common LaTeX formatting issues in Markdown
+    markdown = markdown.replace(/\\\(/g, "$").replace(/\\\)/g, "$");
+    markdown = markdown.replace(/\\\[/g, "$$").replace(/\\\]/g, "$$");
 
-    return cleaned;
+    return markdown;
   } catch (error) {
-    console.warn("⚠️ Error cleaning HTML:", error);
-    return html; // Return original if cleaning fails
+    console.warn("⚠️ Error converting to Markdown:", error);
+    return html; // Return original if conversion fails
   }
 };
 
@@ -279,11 +302,11 @@ const syncLatestAcceptedSubmission = async (
     console.log("⚡ Processing content...");
     const problemUrl = `https://codeforces.com/contest/${contestId}/problem/${index}`;
 
-    // 🚀 OPTIMIZATION: Use simpler HTML cleaning by default
-    const cleanedHTML = problemHTML ? simpleCleanHTML(problemHTML) : null;
-    const readmeContent = cleanedHTML
-      ? `<h3><a href="${problemUrl}" target="_blank" rel="noopener noreferrer">${problemName}</a></h3>\n\n${cleanedHTML}`
-      : `<h3><a href="${problemUrl}" target="_blank" rel="noopener noreferrer">${problemName}</a></h3>\n\nProblem statement could not be retrieved. Please visit the link above.`;
+    // 🚀 OPTIMIZATION: Use robust Markdown conversion
+    const markdownContent = problemHTML ? convertToMarkdown(problemHTML) : null;
+    const readmeContent = markdownContent
+      ? `# [${problemName}](${problemUrl})\n\n${markdownContent}`
+      : `# [${problemName}](${problemUrl})\n\nProblem statement could not be retrieved. Please visit the link above.`;
 
     const commitMessage = `Add ${problemName} [${index}] from Codeforces`;
 
