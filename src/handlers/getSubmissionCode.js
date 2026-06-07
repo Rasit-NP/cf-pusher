@@ -120,8 +120,8 @@ export const getProblemStatement = (contestId, index) => {
           ) {
             cleanup();
 
-            if (message.html) {
-              resolve(message.html);
+            if (message.markdown) {
+              resolve(message.markdown);
             } else {
               reject(new Error(message.error || "Problem statement not found"));
             }

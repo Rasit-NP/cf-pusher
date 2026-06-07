@@ -1,5 +1,4 @@
 /* eslint-disable no-undef */
-import TurndownService from "turndown";
 import { fetchAcceptedSubmissions } from "./handlers/codeforcesHandler";
 import {
   getSubmissionCode,
@@ -105,79 +104,24 @@ const getProblemStatementCached = async (contestId, index, cacheKey) => {
 
   try {
     console.log(`🌐 Fetching problem statement for ${contestId}-${index}`);
-    const problemHTML = await getProblemStatement(contestId, index);
+    const problemMarkdown = await getProblemStatement(contestId, index);
 
-    if (problemHTML) {
-      cache.set(cacheKey, problemHTML);
+    if (problemMarkdown) {
+      cache.set(cacheKey, problemMarkdown);
       console.log(`✅ Cached problem statement for ${contestId}-${index}`);
     }
 
-    return problemHTML;
+    return problemMarkdown;
   } catch (error) {
     console.warn(`⚠️ Failed to fetch problem statement: ${error.message}`);
     return null;
   }
 };
 
-// Initialize TurndownService
-const turndownService = new TurndownService({
-  headingStyle: "atx",
-  codeBlockStyle: "fenced",
-  emDelimiter: "_",
-});
-
-// Add rules to TurndownService for MathJax and specific Codeforces elements
-turndownService.addRule("mathjax", {
-  filter: (node) => {
-    return (
-      node.nodeName === "SCRIPT" &&
-      (node.getAttribute("type") === "math/tex" ||
-        node.getAttribute("type") === "math/tex; mode=display")
-    );
-  },
-  replacement: (content, node) => {
-    const isDisplay = node.getAttribute("type").includes("display");
-    return isDisplay ? `\n\n$$${content}$$\n\n` : `$${content}$`;
-  },
-});
-
-// Remove unnecessary elements
-turndownService.remove(["script", "style", "noscript"]);
-
-// 🚀 IMPROVEMENT: Robust HTML to Markdown conversion
-const convertToMarkdown = (html) => {
-  if (!html) return null;
-
-  try {
-    let processedHTML = html;
-
-    // Handle standard Codeforces MathJax span structure
-    processedHTML = processedHTML.replace(
-      /<span class=["']tex-font-style-tt["']>(.*?)<\/span>/g,
-      "`$1`"
-    );
-
-    // Some MathJax might be in elements with specific classes
-    processedHTML = processedHTML.replace(
-      /<span class=["'](tex-graphics|mathjax-inline|mathjax-display)["'][^>]*>(.*?)<\/span>/g,
-      (match, cls, content) => {
-        return content.includes("$") ? content : `$${content}$`;
-      }
-    );
-
-    // Convert to Markdown
-    let markdown = turndownService.turndown(processedHTML);
-
-    // Post-process to fix common LaTeX formatting issues in Markdown
-    markdown = markdown.replace(/\\\(/g, "$").replace(/\\\)/g, "$");
-    markdown = markdown.replace(/\\\[/g, "$$").replace(/\\\]/g, "$$");
-
-    return markdown;
-  } catch (error) {
-    console.warn("⚠️ Error converting to Markdown:", error);
-    return html; // Return original if conversion fails
-  }
-};
+// NOTE: HTML -> Markdown conversion (including MathJax handling) now happens in
+// the content script (src/content.js), which runs in a real page context with a
+// DOM and rendered MathJax. The service worker has no DOMParser/document, so
+// Turndown cannot run here — the problem statement arrives already as Markdown.
 
 // 🚀 IMPROVEMENT: Optimized sync function with better error handling and performance
 const syncLatestAcceptedSubmission = async (
@@ -280,10 +224,10 @@ const syncLatestAcceptedSubmission = async (
     }
     const code = codeResult.value;
 
-    // Handle problem result (non-blocking)
-    let problemHTML = null;
+    // Handle problem result (non-blocking). Already Markdown from the content script.
+    let problemMarkdown = null;
     if (problemResult.status === "fulfilled" && problemResult.value) {
-      problemHTML = problemResult.value;
+      problemMarkdown = problemResult.value;
     } else {
       const errorMsg = problemResult.reason?.message || "Unknown error";
       console.warn("⚠️ Could not retrieve problem statement:", errorMsg);
@@ -302,8 +246,8 @@ const syncLatestAcceptedSubmission = async (
     console.log("⚡ Processing content...");
     const problemUrl = `https://codeforces.com/contest/${contestId}/problem/${index}`;
 
-    // 🚀 OPTIMIZATION: Use robust Markdown conversion
-    const markdownContent = problemHTML ? convertToMarkdown(problemHTML) : null;
+    // Problem statement is already converted to Markdown in the content script.
+    const markdownContent = problemMarkdown;
     const readmeContent = markdownContent
       ? `# [${problemName}](${problemUrl})\n\n${markdownContent}`
       : `# [${problemName}](${problemUrl})\n\nProblem statement could not be retrieved. Please visit the link above.`;

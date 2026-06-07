@@ -1,3 +1,5 @@
+import { buildProblemMarkdown, isMathReady } from "./handlers/problemFormatter";
+
 const sendResult = (type, data, error = null) => {
   try {
     const message = {
@@ -10,7 +12,7 @@ const sendResult = (type, data, error = null) => {
     if (type === "SUBMISSION_CODE") {
       message.code = data;
     } else if (type === "PROBLEM_STATEMENT") {
-      message.html = data;
+      message.markdown = data;
     } else {
       message.data = data;
     }
@@ -68,7 +70,10 @@ const extractSubmissionCode = () => {
   return null;
 };
 
-const extractProblemStatement = () => {
+// Returns the problem statement converted to Markdown, or null when not ready /
+// not found. Pass force=true to convert even if MathJax hasn't finished (used as
+// a last resort when waiting times out).
+const extractProblemStatement = (force = false) => {
   const selectors = [
     ".problem-statement",
     ".problemtext",
@@ -82,8 +87,12 @@ const extractProblemStatement = () => {
     try {
       const element = document.querySelector(selector);
       if (element && element.innerHTML.trim()) {
+        if (!force && !isMathReady(element)) {
+          console.log("⏳ Waiting for MathJax to finish rendering...");
+          return null;
+        }
         console.log(`✅ Found problem statement using selector: ${selector}`);
-        return element.innerHTML.trim();
+        return buildProblemMarkdown(element);
       }
     } catch (err) {
       console.warn(`Problem selector failed: ${selector}`, err);
@@ -94,7 +103,7 @@ const extractProblemStatement = () => {
     const mainContent = document.querySelector(".main-content, .content, main");
     if (mainContent && mainContent.innerHTML.trim()) {
       console.log("✅ Found problem statement using fallback main content");
-      return mainContent.innerHTML.trim();
+      return buildProblemMarkdown(mainContent);
     }
   } catch (err) {
     console.warn("Main content fallback failed:", err);
@@ -103,7 +112,7 @@ const extractProblemStatement = () => {
   return null;
 };
 
-const quickExtract = () => {
+const quickExtract = (force = false) => {
   if (window.location.pathname.includes("/submission/")) {
     const code = extractSubmissionCode();
     if (code) {
@@ -113,9 +122,9 @@ const quickExtract = () => {
   }
 
   if (window.location.pathname.includes("/problem/")) {
-    const problemHTML = extractProblemStatement();
-    if (problemHTML) {
-      sendResult("PROBLEM_STATEMENT", problemHTML);
+    const problemMarkdown = extractProblemStatement(force);
+    if (problemMarkdown) {
+      sendResult("PROBLEM_STATEMENT", problemMarkdown);
       return true;
     }
   }
@@ -167,6 +176,10 @@ const attemptExtraction = () => {
 
     attempts++;
     if (attempts >= maxAttempts) {
+      // Last resort: emit even if MathJax never finished. Any raw $$$ that slipped
+      // through is normalized to $...$ in convertProblemToMarkdown.
+      if (quickExtract(true)) return;
+
       if (window.location.pathname.includes("/submission/")) {
         sendResult("SUBMISSION_CODE", null, "Code element not found on page");
       } else if (window.location.pathname.includes("/problem/")) {
@@ -204,11 +217,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "extractProblemStatement") {
       console.log("📨 Received request to extract problem statement");
 
-      const problemHTML = extractProblemStatement();
+      const problemMarkdown = extractProblemStatement(true);
       const response = {
-        success: !!problemHTML,
-        data: problemHTML,
-        error: problemHTML ? null : "Problem statement not found",
+        success: !!problemMarkdown,
+        data: problemMarkdown,
+        error: problemMarkdown ? null : "Problem statement not found",
         url: window.location.href,
       };
 
