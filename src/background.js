@@ -8,11 +8,14 @@ import { pushToGitHubWithRetry } from "./handlers/githubHandler";
 
 let isSyncing = false;
 let lastSyncTime = 0;
-let lastSubmissionId = null;
 
 // 🚀 PERFORMANCE IMPROVEMENT: Ultra-fast sync for instant response
 const SYNC_INTERVAL_MINUTES = 0.1; // 6 seconds for ultra-fast response
 const MIN_SYNC_INTERVAL_MS = 2000; // Minimum 2 seconds between syncs for maximum responsiveness
+// 🚀 Catch-up: how many unsynced submissions to push per sync run. Keeps each run
+// bounded so a contest's worth of solves is backfilled over a few runs without
+// blowing the GitHub rate limit (60 req/min; each submission costs ~4 requests).
+const MAX_PUSHES_PER_SYNC = 5;
 
 const langMapping = {
   "C++": "cpp",
@@ -123,7 +126,135 @@ const getProblemStatementCached = async (contestId, index, cacheKey) => {
 // DOM and rendered MathJax. The service worker has no DOMParser/document, so
 // Turndown cannot run here — the problem statement arrives already as Markdown.
 
-// 🚀 IMPROVEMENT: Optimized sync function with better error handling and performance
+// 🚀 Push a single accepted submission (README + code) to GitHub.
+// Returns true only when BOTH files are pushed, so the caller can mark it synced.
+const processSubmission = async (submission, githubToken, linkedRepo) => {
+  const {
+    contestId,
+    id: submissionId,
+    index,
+    problemName,
+    programmingLanguage,
+  } = submission;
+
+  const folderName = `${contestId}/${index} - ${problemName}`;
+  const extension = getExtensionFromLanguage(programmingLanguage);
+  const filePath = `Codeforces/${folderName}/solution.${extension}`;
+  const readmePath = `Codeforces/${folderName}/README.md`;
+  const problemCacheKey = `cf-problem-${contestId}-${index}`;
+
+  console.log(`⚡ Starting parallel fetch operations for ${folderName}...`);
+
+  // 🚀 OPTIMIZATION: Run code and problem fetching in parallel
+  const [codeResult, problemResult] = await Promise.allSettled([
+    getSubmissionCode(contestId, submissionId),
+    getProblemStatementCached(contestId, index, problemCacheKey),
+  ]);
+
+  // Handle code result
+  if (codeResult.status === "rejected" || !codeResult.value) {
+    const errorMsg = codeResult.reason?.message || "Unknown error";
+    console.error("❌ Failed to get submission code:", errorMsg);
+
+    // Check if it's an access issue
+    if (errorMsg.includes("access denied") || errorMsg.includes("permission")) {
+      console.log("🔒 Submission may be private or restricted");
+    } else if (errorMsg.includes("Timeout")) {
+      console.log("⏱️ Request timed out - page may be slow or inaccessible");
+    }
+    return false;
+  }
+  const code = codeResult.value;
+
+  // Handle problem result (non-blocking). Already Markdown from the content script.
+  let problemMarkdown = null;
+  if (problemResult.status === "fulfilled" && problemResult.value) {
+    problemMarkdown = problemResult.value;
+  } else {
+    const errorMsg = problemResult.reason?.message || "Unknown error";
+    console.warn("⚠️ Could not retrieve problem statement:", errorMsg);
+
+    // Check if it's an access issue
+    if (errorMsg.includes("access denied") || errorMsg.includes("permission")) {
+      console.log("🔒 Problem may be from a private contest or restricted");
+    } else if (errorMsg.includes("Timeout")) {
+      console.log("⏱️ Problem statement request timed out");
+    }
+  }
+
+  console.log("⚡ Processing content...");
+  const problemUrl = `https://codeforces.com/contest/${contestId}/problem/${index}`;
+
+  // Problem statement is already converted to Markdown in the content script.
+  const markdownContent = problemMarkdown;
+  const readmeContent = markdownContent
+    ? `# [${problemName}](${problemUrl})\n\n${markdownContent}`
+    : `# [${problemName}](${problemUrl})\n\nProblem statement could not be retrieved. Please visit the link above.`;
+
+  const commitMessage = `Add ${problemName} [${index}] from Codeforces`;
+
+  console.log("⚡ Starting GitHub push operations...");
+
+  let codePushSuccess = false;
+  let readmePushSuccess = false;
+
+  try {
+    // Step 1: Push README first (creates the folder structure)
+    console.log("📝 Pushing README first...");
+    rateLimitTracker.recordRequest("github");
+    readmePushSuccess = await pushToGitHubWithRetry({
+      repoFullName: linkedRepo,
+      githubToken,
+      filePath: readmePath,
+      commitMessage: `${commitMessage} (Problem Statement)`,
+      content: readmeContent,
+    });
+
+    if (readmePushSuccess) {
+      console.log("✅ README pushed successfully");
+
+      // Small delay to ensure GitHub processes the folder creation
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      // Step 2: Push code after README succeeds (folder now exists)
+      console.log("💻 Pushing code...");
+      rateLimitTracker.recordRequest("github");
+      codePushSuccess = await pushToGitHubWithRetry({
+        repoFullName: linkedRepo,
+        githubToken,
+        filePath,
+        commitMessage,
+        content: code,
+      });
+
+      if (codePushSuccess) {
+        console.log("✅ Code pushed successfully");
+      } else {
+        console.error("❌ Code push failed after retries");
+      }
+    } else {
+      console.error("❌ README push failed, skipping code push");
+    }
+  } catch (error) {
+    console.error("❌ Error during GitHub push operations:", error);
+  }
+
+  if (codePushSuccess && readmePushSuccess) {
+    console.log(`✅ Successfully pushed ${folderName}`);
+    return true;
+  }
+
+  console.error(`❌ Failed to push one or more files to ${folderName}`);
+  if (!codePushSuccess) console.error("Code push failed");
+  if (!readmePushSuccess) console.error("README push failed");
+  return false;
+};
+
+// 🚀 IMPROVEMENT: Optimized sync function with better error handling and performance.
+// Backfills EVERY accepted submission that hasn't been synced yet (oldest first),
+// so a whole contest's solves get pushed, not just the most recent one. Bounded by
+// MAX_PUSHES_PER_SYNC per run to respect rate limits; remaining ones catch up on
+// the next sync.
 const syncLatestAcceptedSubmission = async (
   githubToken,
   linkedRepo,
@@ -146,7 +277,7 @@ const syncLatestAcceptedSubmission = async (
 
   isSyncing = true;
   lastSyncTime = now;
-  console.log("🔁 Syncing latest accepted submission...");
+  console.log("🔁 Syncing accepted submissions...");
   const startTime = Date.now();
 
   try {
@@ -167,163 +298,50 @@ const syncLatestAcceptedSubmission = async (
       return;
     }
 
-    const latest = accepted[0];
-    const {
-      contestId,
-      id: submissionId,
-      index,
-      problemName,
-      programmingLanguage,
-    } = latest;
-
-    // 🚀 Quick check if this submission was already processed
-    if (lastSubmissionId === submissionId) {
-      console.log("✅ Latest submission already processed");
-      return;
-    }
-
-    const folderName = `${contestId}/${index} - ${problemName}`;
-    const extension = getExtensionFromLanguage(programmingLanguage);
-    const filePath = `Codeforces/${folderName}/solution.${extension}`;
-    const readmePath = `Codeforces/${folderName}/README.md`;
-
     const cacheKey = `cf-synced-problems`;
-    const problemCacheKey = `cf-problem-${contestId}-${index}`;
-
     const result = await chrome.storage.sync.get([cacheKey]);
     let syncedProblems = result[cacheKey] || {};
-    if (syncedProblems[submissionId]) {
-      console.log(`🟡 Already synced ${folderName}, skipping...`);
-      lastSubmissionId = submissionId;
+
+    // 🚀 Backfill: process oldest unsynced first so READMEs/folders appear in
+    // chronological order. The API returns newest-first, so reverse the filter.
+    const pending = accepted
+      .filter((s) => !syncedProblems[s.id])
+      .reverse();
+
+    if (pending.length === 0) {
+      console.log("✅ All accepted submissions already synced");
       return;
     }
 
-    console.log("⚡ Starting parallel fetch operations...");
+    console.log(
+      `📥 ${pending.length} unsynced submission(s); pushing up to ${MAX_PUSHES_PER_SYNC} this run`
+    );
 
-    // 🚀 OPTIMIZATION: Run code and problem fetching in parallel
-    const [codeResult, problemResult] = await Promise.allSettled([
-      getSubmissionCode(contestId, submissionId),
-      getProblemStatementCached(contestId, index, problemCacheKey),
-    ]);
-
-    // Handle code result
-    if (codeResult.status === "rejected" || !codeResult.value) {
-      const errorMsg = codeResult.reason?.message || "Unknown error";
-      console.error("❌ Failed to get submission code:", errorMsg);
-
-      // Check if it's an access issue
-      if (
-        errorMsg.includes("access denied") ||
-        errorMsg.includes("permission")
-      ) {
-        console.log("🔒 Submission may be private or restricted");
-      } else if (errorMsg.includes("Timeout")) {
-        console.log("⏱️ Request timed out - page may be slow or inaccessible");
+    let pushedCount = 0;
+    for (const submission of pending) {
+      if (pushedCount >= MAX_PUSHES_PER_SYNC) {
+        console.log("⏸️ Reached per-sync push limit, remaining will catch up next run");
+        break;
       }
-      return;
-    }
-    const code = codeResult.value;
 
-    // Handle problem result (non-blocking). Already Markdown from the content script.
-    let problemMarkdown = null;
-    if (problemResult.status === "fulfilled" && problemResult.value) {
-      problemMarkdown = problemResult.value;
-    } else {
-      const errorMsg = problemResult.reason?.message || "Unknown error";
-      console.warn("⚠️ Could not retrieve problem statement:", errorMsg);
+      // 🚀 Rate limiting check for GitHub before each submission (~4 requests each)
+      if (!rateLimitTracker.canMakeRequest("github")) {
+        console.warn("⏳ Rate limit reached for GitHub API, deferring remaining pushes");
+        break;
+      }
 
-      // Check if it's an access issue
-      if (
-        errorMsg.includes("access denied") ||
-        errorMsg.includes("permission")
-      ) {
-        console.log("🔒 Problem may be from a private contest or restricted");
-      } else if (errorMsg.includes("Timeout")) {
-        console.log("⏱️ Problem statement request timed out");
+      const success = await processSubmission(submission, githubToken, linkedRepo);
+      if (success) {
+        syncedProblems[submission.id] = true;
+        await chrome.storage.sync.set({ [cacheKey]: syncedProblems });
+        pushedCount++;
       }
     }
 
-    console.log("⚡ Processing content...");
-    const problemUrl = `https://codeforces.com/contest/${contestId}/problem/${index}`;
-
-    // Problem statement is already converted to Markdown in the content script.
-    const markdownContent = problemMarkdown;
-    const readmeContent = markdownContent
-      ? `# [${problemName}](${problemUrl})\n\n${markdownContent}`
-      : `# [${problemName}](${problemUrl})\n\nProblem statement could not be retrieved. Please visit the link above.`;
-
-    const commitMessage = `Add ${problemName} [${index}] from Codeforces`;
-
-    console.log("⚡ Starting GitHub push operations...");
-
-    // 🚀 Rate limiting check for GitHub
-    if (!rateLimitTracker.canMakeRequest("github")) {
-      console.warn("⏳ Rate limit reached for GitHub API, skipping push");
-      return;
-    }
-
-    let codePushSuccess = false;
-    let readmePushSuccess = false;
-
-    try {
-      // Step 1: Push README first (creates the folder structure)
-      console.log("📝 Pushing README first...");
-      rateLimitTracker.recordRequest("github");
-      readmePushSuccess = await pushToGitHubWithRetry({
-        repoFullName: linkedRepo,
-        githubToken,
-        filePath: readmePath,
-        commitMessage: `${commitMessage} (Problem Statement)`,
-        content: readmeContent,
-      });
-
-      if (readmePushSuccess) {
-        console.log("✅ README pushed successfully");
-
-        // Small delay to ensure GitHub processes the folder creation
-        await new Promise((resolve) => setTimeout(resolve, 200));
-
-        // Step 2: Push code after README succeeds (folder now exists)
-        console.log("💻 Pushing code...");
-        rateLimitTracker.recordRequest("github");
-        codePushSuccess = await pushToGitHubWithRetry({
-          repoFullName: linkedRepo,
-          githubToken,
-          filePath,
-          commitMessage,
-          content: code,
-        });
-
-        if (codePushSuccess) {
-          console.log("✅ Code pushed successfully");
-        } else {
-          console.error("❌ Code push failed after retries");
-        }
-      } else {
-        console.error("❌ README push failed, skipping code push");
-      }
-    } catch (error) {
-      console.error("❌ Error during GitHub push operations:", error);
-    }
-
-    if (codePushSuccess && readmePushSuccess) {
-      syncedProblems[submissionId] = true;
-      await chrome.storage.sync.set({ [cacheKey]: syncedProblems });
-      lastSubmissionId = submissionId;
-
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-      console.log(`✅ Successfully pushed ${folderName} in ${elapsed}s`);
-    } else {
-      console.error(`❌ Failed to push one or more files to ${folderName}`);
-      if (codePushSuccess === false) {
-        console.error("Code push failed");
-      }
-      if (readmePushSuccess === false) {
-        console.error("README push failed");
-      }
-    }
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`✅ Synced ${pushedCount} submission(s) in ${elapsed}s`);
   } catch (err) {
-    console.warn("🚨 Error pushing latest accepted submission:", err);
+    console.warn("🚨 Error pushing accepted submissions:", err);
   } finally {
     isSyncing = false;
   }
